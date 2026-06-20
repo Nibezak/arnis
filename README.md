@@ -74,7 +74,7 @@ Arnis has been recognized in various academic and press publications after gaini
 Free to use press assets, including screenshots and logos, can be found [here](https://drive.google.com/file/d/1T1IsZSyT8oa6qAO_40hVF5KR8eEVCJjo/view?usp=sharing).
 
 ## :copyright: License Information
-Copyright (c) 2022-2025 Louis Erbkamm (louis-e)
+Copyright (c) 2022-2026 Louis Erbkamm (louis-e)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -88,9 +88,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.[^3]
 
+The Luanti block-name mapping in `src/luanti_block_map.rs` is derived from [MC2MT](https://github.com/rollerozxa/MC2MT) by rollerozxa and is licensed under the GNU Lesser General Public License v2.1 or later. The full attribution and license header are preserved in that file.
+
 Download Arnis only from the official source https://arnismc.com or https://github.com/louis-e/arnis/. Every other website providing a download and claiming to be affiliated with the project is unofficial and may be malicious.
 
 The logo was made by @nxfx21.
+
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
 
 [^1]: https://en.wikipedia.org/wiki/OpenStreetMap

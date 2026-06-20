@@ -55,18 +55,25 @@ pub fn generate_natural(
                         "broadleaved" => {
                             trees_ok_to_generate.push(TreeType::Oak);
                             trees_ok_to_generate.push(TreeType::Birch);
+                            trees_ok_to_generate.push(TreeType::TallOak);
                         }
-                        "needleleaved" => trees_ok_to_generate.push(TreeType::Spruce),
+                        "needleleaved" => {
+                            trees_ok_to_generate.push(TreeType::Spruce);
+                            trees_ok_to_generate.push(TreeType::Pine);
+                        }
                         _ => {
                             trees_ok_to_generate.push(TreeType::Oak);
                             trees_ok_to_generate.push(TreeType::Spruce);
                             trees_ok_to_generate.push(TreeType::Birch);
+                            trees_ok_to_generate.push(TreeType::TallOak);
+                            trees_ok_to_generate.push(TreeType::Pine);
                         }
                     }
                 } else {
                     trees_ok_to_generate.push(TreeType::Oak);
                     trees_ok_to_generate.push(TreeType::Spruce);
                     trees_ok_to_generate.push(TreeType::Birch);
+                    trees_ok_to_generate.push(TreeType::TallOak);
                 }
 
                 if trees_ok_to_generate.is_empty() {
@@ -84,7 +91,7 @@ pub fn generate_natural(
             }
         } else {
             let mut previous_node: Option<(i32, i32)> = None;
-            let mut corner_addup: (i32, i32, i32) = (0, 0, 0);
+            let mut corner_count: i32 = 0;
             let mut current_natural: Vec<(i32, i32)> = vec![];
             let binding: String = "".to_string();
 
@@ -99,7 +106,7 @@ pub fn generate_natural(
                         _ => SAND,
                     }
                 }
-                "water" | "reef" => WATER,
+                "water" | "reef" | "bay" => WATER,
                 "bare_rock" => STONE,
                 "blockfield" => COBBLESTONE,
                 "glacier" => PACKED_ICE,
@@ -110,6 +117,19 @@ pub fn generate_natural(
                 "cliff" => STONE,
                 _ => GRASS_BLOCK,
             };
+
+            // Whether this natural type should have per-block rock variation
+            // via `vary_rock_block`. Note: "bare_rock" is deliberately NOT in
+            // this list — it has its own dedicated 6-class mix in the match
+            // arm below (STONE/ANDESITE/COBBLESTONE/GRAVEL/TUFF/COARSE_DIRT)
+            // which overwrites whatever we put here. Including it in
+            // rock_variation would mean two different mixes race against each
+            // other at the same cell, where the match-arm mix wins but the
+            // first placement is wasted work.
+            let rock_variation = matches!(
+                natural_type.as_str(),
+                "blockfield" | "cliff" | "saddle" | "ridge" | "mountain_range"
+            );
 
             let ProcessedElement::Way(way) = element else {
                 return;
@@ -141,21 +161,25 @@ pub fn generate_natural(
                                 SMOOTH_STONE,
                             ]),
                         ) {
-                            editor.set_block(block_type, bx, 0, bz, None, None);
+                            let b = if rock_variation {
+                                vary_rock_block(block_type, bx, bz)
+                            } else {
+                                block_type
+                            };
+                            editor.set_block(b, bx, 0, bz, None, None);
                         }
                     }
 
                     current_natural.push((x, z));
-                    corner_addup = (corner_addup.0 + x, corner_addup.1 + z, corner_addup.2 + 1);
+                    corner_count += 1;
                 }
 
                 previous_node = Some((x, z));
             }
 
             // If there are natural nodes, flood-fill the area using cache
-            if corner_addup != (0, 0, 0) {
-                let filled_area: Vec<(i32, i32)> =
-                    flood_fill_cache.get_or_compute(way, args.timeout.as_ref());
+            if corner_count > 0 {
+                let filled_area = flood_fill_cache.get_or_compute(way, args.timeout.as_ref());
 
                 let trees_ok_to_generate: Vec<TreeType> = {
                     let mut trees: Vec<TreeType> = vec![];
@@ -164,18 +188,31 @@ pub fn generate_natural(
                             "broadleaved" => {
                                 trees.push(TreeType::Oak);
                                 trees.push(TreeType::Birch);
+                                trees.push(TreeType::TallOak);
+                                trees.push(TreeType::Bush);
+                                trees.push(TreeType::AzaleaBush);
                             }
-                            "needleleaved" => trees.push(TreeType::Spruce),
+                            "needleleaved" => {
+                                trees.push(TreeType::Spruce);
+                                trees.push(TreeType::Pine);
+                            }
                             _ => {
                                 trees.push(TreeType::Oak);
                                 trees.push(TreeType::Spruce);
                                 trees.push(TreeType::Birch);
+                                trees.push(TreeType::TallOak);
+                                trees.push(TreeType::Pine);
+                                trees.push(TreeType::Bush);
+                                trees.push(TreeType::AzaleaBush);
                             }
                         }
                     } else {
                         trees.push(TreeType::Oak);
                         trees.push(TreeType::Spruce);
                         trees.push(TreeType::Birch);
+                        trees.push(TreeType::TallOak);
+                        trees.push(TreeType::Bush);
+                        trees.push(TreeType::AzaleaBush);
                     }
                     trees
                 };
@@ -196,10 +233,15 @@ pub fn generate_natural(
                     WATER,
                 ];
 
-                for (x, z) in filled_area {
+                for &(x, z) in filled_area.iter() {
                     // Don't overwrite road/path blocks with natural ground
                     if !editor.check_for_block(x, 0, z, Some(protected_blocks)) {
-                        editor.set_block(block_type, x, 0, z, None, None);
+                        let b = if rock_variation {
+                            vary_rock_block(block_type, x, z)
+                        } else {
+                            block_type
+                        };
+                        editor.set_block(b, x, 0, z, None, None);
                     }
                     // Generate custom layer instead of dirt, must be stone on the lowest level
                     match natural_type.as_str() {
@@ -211,7 +253,17 @@ pub fn generate_natural(
                             editor.set_block(STONE, x, -1, z, None, None);
                         }
                         "bare_rock" => {
-                            editor.set_block(STONE, x, 0, z, None, None);
+                            // Varied rock surface: stone base with natural variation
+                            let h = crate::land_cover::coord_hash(x, z) % 12;
+                            let rock = match h {
+                                0..=4 => STONE,       // ~42% stone
+                                5..=6 => ANDESITE,    // ~17% andesite
+                                7..=8 => COBBLESTONE, // ~17% cobblestone
+                                9 => GRAVEL,          // ~8% gravel
+                                10 => TUFF,           // ~8% tuff
+                                _ => COARSE_DIRT,     // ~8% coarse dirt
+                            };
+                            editor.set_block(rock, x, 0, z, None, None);
                         }
                         _ => {}
                     }
@@ -277,8 +329,11 @@ pub fn generate_natural(
                             if !editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) {
                                 continue;
                             }
+                            let density = crate::ground_generation::value_noise_01(x, z, 32);
+                            let tree_threshold = ((60.0 - density * 45.0) as i32).max(5);
+                            let spawn_tree = rng.random_range(0..tree_threshold) == 0;
                             let random_choice: i32 = rng.random_range(0..30);
-                            if random_choice == 0 {
+                            if spawn_tree {
                                 let tree_type = *trees_ok_to_generate
                                     .choose(&mut rng)
                                     .unwrap_or(&TreeType::Oak);
@@ -300,17 +355,14 @@ pub fn generate_natural(
                                 editor.set_block(GRASS, x, 1, z, None, None);
                             }
                         }
-                        "sand" => {
+                        "sand"
                             if editor.check_for_block(x, 0, z, Some(&[SAND]))
-                                && rng.random_range(0..100) == 1
-                            {
-                                editor.set_block(DEAD_BUSH, x, 1, z, None, None);
-                            }
+                                && rng.random_range(0..100) == 1 =>
+                        {
+                            editor.set_block(DEAD_BUSH, x, 1, z, None, None);
                         }
-                        "shoal" => {
-                            if rng.random_bool(0.05) {
-                                editor.set_block(WATER, x, 0, z, Some(&[SAND, GRAVEL]), None);
-                            }
+                        "shoal" if rng.random_bool(0.05) => {
+                            editor.set_block(WATER, x, 0, z, Some(&[SAND, GRAVEL]), None);
                         }
                         "wetland" => {
                             if let Some(wetland_type) = element.tags().get("wetland") {
@@ -343,12 +395,19 @@ pub fn generate_natural(
                                         editor.set_block(TALL_GRASS_TOP, x, 2, z, None, None);
                                     }
                                     "swamp" | "mangrove" => {
-                                        // TODO implement mangrove
                                         let random_choice: i32 = rng.random_range(0..40);
                                         if random_choice == 0 {
-                                            Tree::create(
+                                            let tree_type = if wetland_type == "mangrove" {
+                                                TreeType::Mangrove
+                                            } else if rng.random_bool(0.6) {
+                                                TreeType::Willow
+                                            } else {
+                                                TreeType::Mangrove
+                                            };
+                                            Tree::create_of_type(
                                                 editor,
                                                 (x, 1, z),
+                                                tree_type,
                                                 Some(building_footprints),
                                             );
                                         } else if random_choice < 35 {
@@ -406,8 +465,8 @@ pub fn generate_natural(
                                 let cluster_size = rng.random_range(5..=10);
 
                                 // Create cluster around current position
-                                for dx in -(cluster_size as i32)..=(cluster_size as i32) {
-                                    for dz in -(cluster_size as i32)..=(cluster_size as i32) {
+                                for dx in -cluster_size..=cluster_size {
+                                    for dz in -cluster_size..=cluster_size {
                                         let cluster_x = x + dx;
                                         let cluster_z = z + dz;
 
@@ -605,5 +664,26 @@ pub fn generate_natural_from_relation(
                 );
             }
         }
+    }
+}
+
+/// Vary a rock block type per-coordinate for natural rock areas.
+/// Uses coord_hash for deterministic, spatially-coherent variation.
+fn vary_rock_block(base: Block, x: i32, z: i32) -> Block {
+    let h = crate::land_cover::coord_hash(x, z) % 10;
+    match base {
+        STONE => match h {
+            0..=4 => STONE,
+            5..=6 => ANDESITE,
+            7 => COBBLESTONE,
+            _ => GRAVEL,
+        },
+        COBBLESTONE => match h {
+            0..=4 => COBBLESTONE,
+            5..=6 => ANDESITE,
+            7 => STONE,
+            _ => GRAVEL,
+        },
+        _ => base,
     }
 }

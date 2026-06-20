@@ -3,7 +3,9 @@ use crate::block_definitions::*;
 use crate::bresenham::bresenham_line;
 use crate::coordinate_system::cartesian::XZPoint;
 use crate::deterministic_rng::element_rng;
-use crate::floodfill_cache::FloodFillCache;
+use crate::element_processing::get_nearest_road_block;
+use crate::element_processing::surfaces::{get_blocks_for_surface, semirandom_surface};
+use crate::floodfill_cache::{FloodFillCache, RoadMaskBitmap};
 use crate::osm_parser::ProcessedElement;
 use crate::world_editor::WorldEditor;
 use fastnbt::Value;
@@ -18,6 +20,7 @@ pub fn generate_amenities(
     element: &ProcessedElement,
     args: &Args,
     flood_fill_cache: &FloodFillCache,
+    road_mask: &RoadMaskBitmap,
 ) {
     // Skip if 'layer' or 'level' is negative in the tags
     if let Some(layer) = element.tags().get("layer") {
@@ -98,7 +101,7 @@ pub fn generate_amenities(
                 let roof_block: Block = STONE_BLOCK_SLAB;
 
                 // Use pre-computed flood fill from cache
-                let floor_area: Vec<(i32, i32)> =
+                let floor_area =
                     flood_fill_cache.get_or_compute_element(element, args.timeout.as_ref());
 
                 if floor_area.is_empty() {
@@ -131,25 +134,69 @@ pub fn generate_amenities(
             "bench" => {
                 // Place a bench
                 if let Some(pt) = first_node {
-                    // Use deterministic RNG for consistent bench orientation across region boundaries
                     let mut rng = element_rng(element.id());
-                    // 50% chance to 90 degrees rotate the bench
-                    if rng.random_bool(0.5) {
-                        editor.set_block(SMOOTH_STONE, pt.x, 1, pt.z, None, None);
-                        editor.set_block(OAK_LOG, pt.x + 1, 1, pt.z, None, None);
-                        editor.set_block(OAK_LOG, pt.x - 1, 1, pt.z, None, None);
+                    let road_pos = get_nearest_road_block(pt.x, pt.z, 4, road_mask);
+
+                    let use_east_west = if let Some((rx, rz)) = road_pos {
+                        let dx = (rx - pt.x).abs();
+                        let dz = (rz - pt.z).abs();
+                        dz >= dx
                     } else {
-                        editor.set_block(SMOOTH_STONE, pt.x, 1, pt.z, None, None);
-                        editor.set_block(OAK_LOG, pt.x, 1, pt.z + 1, None, None);
-                        editor.set_block(OAK_LOG, pt.x, 1, pt.z - 1, None, None);
-                    }
+                        rng.random_bool(0.5)
+                    };
+
+                    // facing_a and facing_b must face AWAY from the center (pt.x, pt.z)
+                    let (facing_a, facing_b, dx, dz) = if use_east_west {
+                        // Bench stretches along X axis.
+                        // Stair A is at -1 (West), so it faces West.
+                        // Stair B is at +1 (East), so it faces East.
+                        (StairFacing::West, StairFacing::East, 1, 0)
+                    } else {
+                        // Bench stretches along Z axis.
+                        // Stair A is at -1 (North), so it faces North.
+                        // Stair B is at +1 (South), so it faces South.
+                        (StairFacing::North, StairFacing::South, 0, 1)
+                    };
+
+                    let abs_y = editor.get_absolute_y(pt.x, 1, pt.z);
+                    let bench_blacklist = [OAK_LOG, SPRUCE_LOG];
+                    //place bench
+                    let stair_a = top_stair(create_stair_with_properties(
+                        OAK_STAIRS,
+                        facing_a,
+                        StairShape::Straight,
+                    ));
+                    editor.set_block_with_properties_absolute(
+                        stair_a,
+                        pt.x - dx,
+                        abs_y,
+                        pt.z - dz,
+                        None,
+                        Some(&bench_blacklist),
+                    );
+
+                    editor.set_block(OAK_SLAB_TOP, pt.x, 1, pt.z, None, Some(&bench_blacklist));
+
+                    let stair_b = top_stair(create_stair_with_properties(
+                        OAK_STAIRS,
+                        facing_b,
+                        StairShape::Straight,
+                    ));
+                    editor.set_block_with_properties_absolute(
+                        stair_b,
+                        pt.x + dx,
+                        abs_y,
+                        pt.z + dz,
+                        None,
+                        Some(&bench_blacklist),
+                    );
                 }
             }
             "shelter" => {
                 let roof_block: Block = STONE_BRICK_SLAB;
 
                 // Use pre-computed flood fill from cache
-                let roof_area: Vec<(i32, i32)> =
+                let roof_area =
                     flood_fill_cache.get_or_compute_element(element, args.timeout.as_ref());
 
                 // Place fences and roof slabs at each corner node directly
@@ -171,11 +218,66 @@ pub fn generate_amenities(
             "fountain" => {
                 generate_fountain(editor, element, args, flood_fill_cache);
             }
+            "drinking_water" => {
+                if let Some(pt) = first_node {
+                    editor.set_block(COBBLESTONE_WALL, pt.x, 1, pt.z, None, None);
+
+                    let absolute_y = editor.get_absolute_y(pt.x, 1, pt.z);
+                    let lever_props = HashMap::from([
+                        ("facing".to_string(), Value::String("west".to_string())),
+                        ("powered".to_string(), Value::String("true".to_string())),
+                    ]);
+                    editor.set_block_with_properties_absolute(
+                        BlockWithProperties::new(LEVER, Some(Value::Compound(lever_props))),
+                        pt.x - 1,
+                        absolute_y + 1,
+                        pt.z,
+                        None,
+                        None,
+                    );
+
+                    let spout_props =
+                        HashMap::from([("west".to_string(), Value::String("low".to_string()))]);
+                    editor.set_block_with_properties_absolute(
+                        BlockWithProperties::new(
+                            COBBLESTONE_WALL,
+                            Some(Value::Compound(spout_props)),
+                        ),
+                        pt.x,
+                        absolute_y + 1,
+                        pt.z,
+                        None,
+                        None,
+                    );
+
+                    let cauldron_props =
+                        HashMap::from([("level".to_string(), Value::String("3".to_string()))]);
+                    editor.set_block_with_properties_absolute(
+                        BlockWithProperties::new(
+                            WATER_CAULDRON,
+                            Some(Value::Compound(cauldron_props)),
+                        ),
+                        pt.x - 1,
+                        absolute_y,
+                        pt.z,
+                        None,
+                        None,
+                    );
+                }
+            }
             "parking" => {
                 // Process parking areas
                 let mut previous_node: Option<XZPoint> = None;
 
-                let block_type = GRAY_CONCRETE;
+                // Speckled asphalt mix like roads; honor an explicit surface=* tag.
+                let mut block_types: &[Block] = &[GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA];
+                if let Some(blocks) = element
+                    .tags()
+                    .get("surface")
+                    .and_then(|s| get_blocks_for_surface(s))
+                {
+                    block_types = blocks;
+                }
 
                 for node in element.nodes() {
                     let pt: XZPoint = node.xz();
@@ -186,7 +288,7 @@ pub fn generate_amenities(
                             bresenham_line(prev.x, 0, prev.z, pt.x, 0, pt.z);
                         for (bx, _, bz) in bresenham_points {
                             editor.set_block(
-                                block_type,
+                                semirandom_surface(bx, bz, block_types),
                                 bx,
                                 0,
                                 bz,
@@ -199,12 +301,12 @@ pub fn generate_amenities(
                 }
 
                 // Flood-fill the interior area for parking
-                let flood_area: Vec<(i32, i32)> =
+                let flood_area =
                     flood_fill_cache.get_or_compute_element(element, args.timeout.as_ref());
 
-                for (x, z) in flood_area {
+                for &(x, z) in flood_area.iter() {
                     editor.set_block(
-                        block_type,
+                        semirandom_surface(x, z, block_types),
                         x,
                         0,
                         z,
@@ -236,7 +338,7 @@ pub fn generate_amenities(
                             if local_x == 0 {
                                 // Vertical parking space lines (only on the left edge)
                                 editor.set_block(
-                                    LIGHT_GRAY_CONCRETE,
+                                    WHITE_CONCRETE,
                                     x,
                                     0,
                                     z,
@@ -251,7 +353,7 @@ pub fn generate_amenities(
                             } else if local_z == 0 {
                                 // Horizontal parking space lines (only on the top edge)
                                 editor.set_block(
-                                    LIGHT_GRAY_CONCRETE,
+                                    WHITE_CONCRETE,
                                     x,
                                     0,
                                     z,
@@ -267,7 +369,7 @@ pub fn generate_amenities(
                         } else if local_z == space_length {
                             // Bottom edge of parking spaces (border with driving lane)
                             editor.set_block(
-                                LIGHT_GRAY_CONCRETE,
+                                WHITE_CONCRETE,
                                 x,
                                 0,
                                 z,
@@ -279,19 +381,20 @@ pub fn generate_amenities(
                                 ]),
                                 None,
                             );
-                        } else if local_z > space_length && local_z < space_length + lane_width {
-                            // Driving lane - use darker concrete
-                            editor.set_block(BLACK_CONCRETE, x, 0, z, Some(&[GRAY_CONCRETE]), None);
                         }
+                        // Driving lanes keep the base asphalt mix; the white edge
+                        // line above already separates them from the spaces.
 
                         // Add light posts at parking space outline corners
                         if local_x == 0 && local_z == 0 && zone_x % 3 == 0 && zone_z % 2 == 0 {
-                            // Light posts at regular intervals on parking space corners
-                            editor.set_block(COBBLESTONE_WALL, x, 1, z, None, None);
-                            for dy in 2..=4 {
-                                editor.set_block(OAK_FENCE, x, dy, z, None, None);
+                            // Slim metal lamp with a cool-white head.
+                            editor.set_block(SMOOTH_STONE, x, 1, z, None, None);
+                            editor.set_block(ANDESITE_WALL, x, 2, z, None, None);
+                            for dy in 3..=5 {
+                                editor.set_block(IRON_BARS, x, dy, z, None, None);
                             }
-                            editor.set_block(GLOWSTONE, x, 5, z, None, None);
+                            editor.set_block(SEA_LANTERN, x, 6, z, None, None);
+                            editor.set_block(SMOOTH_STONE_SLAB, x, 7, z, None, None);
                         }
                     }
                 }
@@ -345,8 +448,7 @@ fn generate_fountain(
     }
 
     // ── Way fountain (polygon) ─────────────────────────────────────
-    let floor_area: Vec<(i32, i32)> =
-        flood_fill_cache.get_or_compute_element(element, args.timeout.as_ref());
+    let floor_area = flood_fill_cache.get_or_compute_element(element, args.timeout.as_ref());
 
     if floor_area.is_empty() {
         return;
@@ -393,7 +495,7 @@ fn generate_fountain(
     }
 
     // Fill interior with water at y=1 (and a stone floor at y=0)
-    for &(x, z) in &floor_area {
+    for &(x, z) in floor_area.iter() {
         if !edge_set.contains(&(x, z)) {
             editor.set_block(SMOOTH_STONE, x, 0, z, None, None);
             editor.set_block(WATER, x, 1, z, None, None);

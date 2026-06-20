@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long)]
     pub bedrock: bool,
 
+    /// Generate a Luanti/Minetest world (map.sqlite) instead of Java Edition
+    #[arg(long)]
+    pub luanti: bool,
+
     /// Downloader method (requests/curl/wget) (optional)
     #[arg(long, default_value = "requests")]
     pub downloader: String,
@@ -35,6 +39,12 @@ pub struct Args {
     /// World scale to use, in blocks per meter
     #[arg(long, default_value_t = 1.0)]
     pub scale: f64,
+
+    /// Projection mode for coordinate mapping
+    /// local: each generation starts at Minecraft (0,0) (default)
+    /// web_mercator: global projection for multi-generation worlds
+    #[arg(long, default_value = "local")]
+    pub projection: crate::projection::ProjectionKind,
 
     /// Ground level to use in the Minecraft world
     #[arg(long, default_value_t = -62)]
@@ -63,6 +73,10 @@ pub struct Args {
     #[arg(long = "land-cover", alias = "city-boundaries", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub land_cover: bool,
 
+    /// Disable fetching 3D models from external sources (3DMR + Wikimedia).
+    #[arg(long = "no-3d", default_value_t = true, action = ArgAction::SetFalse)]
+    pub use_3d: bool,
+
     /// Enable debug mode (optional)
     #[arg(long)]
     pub debug: bool,
@@ -83,20 +97,46 @@ pub struct Args {
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
     pub rotation: f64,
 
-    /// Disable the Minecraft build height limit (Y=319).
-    /// When enabled, terrain will use realistic 1:1 scaling without compression,
-    /// even if it exceeds the vanilla height limit.
-    /// Requires a Minecraft data pack that increases the world height.
+    /// Extend build height via a bundled pack (Java 1.21.4+: Y=-2032..2031;
+    /// Bedrock 1.21.40+: Y=-512..512). Both are experimental.
     #[arg(long, default_value_t = false)]
     pub disable_height_limit: bool,
+
+    /// Skip the regional high-resolution elevation providers  and only use
+    /// AWS Terrain Tiles for faster generation.
+    #[arg(long, default_value_t = false)]
+    pub aws_only_elevation: bool,
+
+    /// Print generation-only timing to stderr (excludes data fetching)
+    #[arg(long, hide = true)]
+    pub benchmark: bool,
+
+    /// Bake per-chunk lighting so distant chunks render lit in LOD mods
+    /// (Voxy/Chunky) without visiting them. Slower; off by default.
+    #[arg(long, default_value_t = false)]
+    pub bake_lighting: bool,
 }
 
 /// Validates CLI arguments after parsing.
 /// For Java Edition: `--path` is required. If the directory doesn't exist, it will be created.
 /// For Bedrock Edition (`--bedrock`): `--path` is optional (defaults to Desktop output).
 pub fn validate_args(args: &Args) -> Result<(), String> {
+    if args.bedrock && args.luanti {
+        return Err("Cannot use --bedrock and --luanti together.".to_string());
+    }
+
     if args.bedrock {
         // Bedrock: path is optional; if provided, it must be an existing directory
+        if let Some(ref path) = args.path {
+            if !path.exists() {
+                return Err(format!("Path does not exist: {}", path.display()));
+            }
+            if !path.is_dir() {
+                return Err(format!("Path is not a directory: {}", path.display()));
+            }
+        }
+    } else if args.luanti {
+        // Luanti: path optional, defaults to OS Luanti worlds dir
         if let Some(ref path) = args.path {
             if !path.exists() {
                 return Err(format!("Path does not exist: {}", path.display()));
@@ -191,6 +231,7 @@ mod tests {
         assert!(!args.terrain);
         assert!(!args.bedrock);
         assert!(!args.disable_height_limit);
+        assert!(!args.bake_lighting);
         // interior, roof, land_cover default to true
         assert!(args.interior);
         assert!(args.roof);

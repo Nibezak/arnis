@@ -18,10 +18,29 @@ export const licenseText = `
 <br><br>
 
 <b>Stadia Maps:</b><br> © <a href="https://www.stadiamaps.com/" style="color: inherit;" target="_blank">Stadia Maps</a> © <a href="https://openmaptiles.org/" style="color: inherit;" target="_blank">OpenMapTiles</a> © OpenStreetMap contributors
+<br><br>
+
+<b>OpenFreeMap:</b><br> Vector tiles © <a href="https://openfreemap.org" style="color: inherit;" target="_blank">OpenFreeMap</a>, "Liberty" style © <a href="https://www.openmaptiles.org/" style="color: inherit;" target="_blank">OpenMapTiles</a>, map data © OpenStreetMap contributors
 <p>Users of this software must comply with the respective licensing terms of these map data providers when using the application.</p>
 
 <b>AWS Terrain Tiles:</b><br>
-Elevation data derived from the <a href="https://registry.opendata.aws/terrain-tiles/" style="color: inherit;" target="_blank">AWS Terrain Tiles</a> dataset.
+Elevation data derived from the <a href="https://registry.opendata.aws/terrain-tiles/" style="color: inherit;" target="_blank">AWS Terrain Tiles</a> dataset (global fallback).
+<br><br>
+
+<b>USGS 3D Elevation Program (3DEP):</b><br>
+Elevation data provided by the <a href="https://www.usgs.gov/3d-elevation-program" style="color: inherit;" target="_blank">U.S. Geological Survey, 3D Elevation Program</a>. Public Domain.
+<br><br>
+
+<b>IGN France RGE ALTI:</b><br>
+Elevation data &copy; <a href="https://geoservices.ign.fr/" style="color: inherit;" target="_blank">IGN France</a>, RGE ALTI. Licensed under <a href="https://www.etalab.gouv.fr/licence-ouverte-open-licence/" style="color: inherit;" target="_blank">Licence Ouverte 2.0</a>.
+<br><br>
+
+<b>IGN España MDT:</b><br>
+Elevation data &copy; <a href="https://www.ign.es/" style="color: inherit;" target="_blank">Instituto Geogr&aacute;fico Nacional de Espa&ntilde;a</a>. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color: inherit;" target="_blank">CC BY 4.0</a>.
+<br><br>
+
+<b>GSI Japan Elevation Tiles:</b><br>
+Elevation data provided by the <a href="https://maps.gsi.go.jp/" style="color: inherit;" target="_blank">Geospatial Information Authority of Japan</a>.
 <br><br>
 
 <b>ESA WorldCover 2021:</b><br>
@@ -32,9 +51,56 @@ Land cover classification data provided by the <a href="https://esa-worldcover.o
 Bedrock Edition world format support uses the <a href="https://github.com/bedrock-crustaceans/bedrock-rs" style="color: inherit;" target="_blank">bedrock-rs</a> library, licensed under the Apache License 2.0.
 <br><br>
 
+<b>MC2MT:</b><br>
+The Luanti block mapping (<code>src/luanti_block_map.rs</code>) is derived from <a href="https://github.com/rollerozxa/MC2MT" style="color: inherit;" target="_blank">MC2MT</a> by rollerozxa. Licensed under <a href="https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html" style="color: inherit;" target="_blank">LGPL-2.1-or-later</a>.
+<br><br>
+
+<b>Mineclonia:</b><br>
+Generated Luanti worlds use the <a href="https://content.luanti.org/packages/Mineclonia/mineclonia/" style="color: inherit;" target="_blank">Mineclonia</a> game pack for Luanti. Mineclonia is independent of and not associated with Mojang or Microsoft.
+<br><br>
+
+<b>Luanti (formerly Minetest):</b><br>
+Luanti world export targets the <a href="https://www.luanti.org" style="color: inherit;" target="_blank">Luanti</a> engine, licensed under <a href="https://github.com/luanti-org/luanti/blob/master/LICENSE.txt" style="color: inherit;" target="_blank">LGPL-2.1+</a>.
+<br><br>
+
+<p><b>Third-Party JavaScript Libraries:</b></p>
+<p>The map picker bundles the following libraries:</p>
+
+<b><a href="https://leafletjs.com" style="color: inherit;" target="_blank">Leaflet</a> 1.9.4:</b> © 2010-2023 Vladimir Agafonkin, © 2010-2011 CloudMade. BSD-2-Clause.
+<br><br>
+
+<b><a href="https://github.com/Leaflet/Leaflet.draw" style="color: inherit;" target="_blank">Leaflet.draw</a> 1.0.4:</b> © 2012-2017 Jacob Toye, Jon West, Smartrak, Leaflet. MIT.
+<br><br>
+
+<b><a href="https://github.com/Turbo87/leaflet-sidebar" style="color: inherit;" target="_blank">L.Control.Sidebar</a>:</b> © Tobias Bieniek, customized for this project. MIT.
+<br><br>
+
+<b><a href="https://github.com/proj4js/proj4js" style="color: inherit;" target="_blank">proj4js</a>:</b> © 2014 Mike Adair, Richard Greenwood, Didier Richard, Stephen Irons, Olivier Terral, Calvin Metcalf. MIT.
+<br><br>
+
+<b><a href="https://github.com/kartena/Proj4Leaflet" style="color: inherit;" target="_blank">Proj4Leaflet</a> 1.0.2:</b> © 2013-2016 Kartena AB. BSD-2-Clause.
+<br><br>
+
+<b><a href="https://github.com/arthur-e/Wicket" style="color: inherit;" target="_blank">Wicket (WKT parser)</a>:</b> © Arthur Endsley. GPL.
+<br><br>
+
+<b><a href="https://maplibre.org" style="color: inherit;" target="_blank">MapLibre GL JS</a> 5.6.0:</b> © MapLibre contributors. BSD-3-Clause.
+<br><br>
+
+<b><a href="https://github.com/maplibre/maplibre-gl-leaflet" style="color: inherit;" target="_blank">maplibre-gl-leaflet</a> 0.1.3:</b> © 2021 MapLibre contributors, © 2014 Mapbox. ISC.
+<br><br>
+
+<b><a href="https://jquery.com" style="color: inherit;" target="_blank">jQuery</a> 1.9.1:</b> © jQuery Foundation. MIT.
+<br><br>
+
+<b><a href="https://jqueryui.com" style="color: inherit;" target="_blank">jQuery UI</a> 1.10.3:</b> © jQuery Foundation and contributors. MIT.
+<br><br>
+
 <p><b>Privacy Policy:</b></p>
 If you consent to telemetry data collection, please review our Privacy Policy at:
 <a href="https://arnismc.com/privacypolicy.html" style="color: inherit;" target="_blank">https://arnismc.com/privacypolicy.html</a>.
+
+<p>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
 
 <p><b>License:</b></p>
 <pre style="white-space: pre-wrap; font-family: inherit;">

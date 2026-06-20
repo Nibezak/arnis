@@ -4,6 +4,7 @@ use crate::coordinate_system::geographic::{LLBBox, LLPoint};
 use crate::coordinate_system::transformation::CoordTransformer;
 use crate::data_processing::{self, GenerationOptions};
 use crate::ground::{self, Ground};
+use crate::map_preview;
 use crate::map_transformation;
 use crate::osm_parser;
 use crate::overture;
@@ -63,6 +64,43 @@ impl Drop for SessionLock {
     }
 }
 
+/// Removes a freshly created Java world directory. Called whenever generation
+/// bails out before producing anything useful, so the user isn't left with a
+/// growing pile of empty "Arnis World N" folders.
+fn remove_new_java_world(path: &Path) {
+    if path.exists() {
+        if let Err(e) = fs::remove_dir_all(path) {
+            eprintln!("Failed to remove newly created world after failure: {e}");
+        }
+    }
+}
+
+/// RAII guard that removes a newly created Java world on drop unless disarmed.
+/// Must be declared *before* any `SessionLock` so the lock's file handle is
+/// released first (Windows blocks folder removal otherwise).
+struct NewWorldCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl NewWorldCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for NewWorldCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_new_java_world(&self.path);
+        }
+    }
+}
+
 pub fn run_gui() {
     // Configure thread pool with 90% CPU cap to keep system responsive
     crate::floodfill_cache::configure_rayon_thread_pool(0.9);
@@ -112,9 +150,12 @@ pub fn run_gui() {
             gui_pick_save_directory,
             gui_start_generation,
             gui_get_version,
-            gui_check_for_updates,
+            gui_get_update_info,
+            gui_get_platform,
+            gui_clear_tile_caches,
             gui_get_world_map_data,
-            gui_show_in_folder
+            gui_show_in_folder,
+            gui_get_3d_model_attributions
         ])
         .setup(|app| {
             let app_handle = app.handle();
@@ -176,6 +217,32 @@ fn detect_minecraft_saves_directory() -> PathBuf {
 #[tauri::command]
 fn gui_get_default_save_path() -> String {
     detect_minecraft_saves_directory().display().to_string()
+}
+
+#[derive(serde::Serialize)]
+struct AttributionRow {
+    label: String,
+    artist: String,
+    license: String,
+    license_url: Option<String>,
+    source_url: String,
+}
+
+#[tauri::command]
+fn gui_get_3d_model_attributions() -> Vec<AttributionRow> {
+    crate::models_3d::wikidata::PERMISSIVE_ATTRIBUTIONS
+        .iter()
+        .map(|e| AttributionRow {
+            label: e.label.clone(),
+            artist: e
+                .artist
+                .clone()
+                .unwrap_or_else(|| "Wikimedia contributor".into()),
+            license: e.license.clone(),
+            license_url: e.license_url.clone(),
+            source_url: e.url.clone(),
+        })
+        .collect()
 }
 
 /// Validates and returns a user-provided save path.
@@ -296,6 +363,7 @@ fn add_localized_world_name(world_path: PathBuf, bbox: &LLBBox) -> PathBuf {
         };
 
     let new_name = format!("{base_name}: {truncated_area_name}");
+    let mut write_succeeded = false;
 
     // Update the level.dat file with the new name
     if let Ok(level_data) = std::fs::read(&level_path) {
@@ -306,7 +374,7 @@ fn add_localized_world_name(world_path: PathBuf, bbox: &LLBBox) -> PathBuf {
                 // Update the level name in NBT data
                 if let Value::Compound(ref mut root) = nbt_data {
                     if let Some(Value::Compound(ref mut data)) = root.get_mut("Data") {
-                        data.insert("LevelName".to_string(), Value::String(new_name));
+                        data.insert("LevelName".to_string(), Value::String(new_name.clone()));
 
                         // Save the updated NBT data
                         if let Ok(serialized_data) = fastnbt::to_bytes(&nbt_data) {
@@ -316,13 +384,18 @@ fn add_localized_world_name(world_path: PathBuf, bbox: &LLBBox) -> PathBuf {
                             );
                             if encoder.write_all(&serialized_data).is_ok() {
                                 if let Ok(compressed_data) = encoder.finish() {
-                                    if let Err(e) = std::fs::write(&level_path, compressed_data) {
-                                        eprintln!("Failed to update level.dat with area name: {e}");
-                                        #[cfg(feature = "gui")]
-                                        send_log(
-                                            LogLevel::Warning,
-                                            "Failed to update level.dat with area name",
-                                        );
+                                    match std::fs::write(&level_path, compressed_data) {
+                                        Ok(_) => write_succeeded = true,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Failed to update level.dat with area name: {e}"
+                                            );
+                                            #[cfg(feature = "gui")]
+                                            send_log(
+                                                LogLevel::Warning,
+                                                "Failed to update level.dat with area name",
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -331,6 +404,10 @@ fn add_localized_world_name(world_path: PathBuf, bbox: &LLBBox) -> PathBuf {
                 }
             }
         }
+    }
+
+    if write_succeeded {
+        progress::emit_world_name_update(&new_name);
     }
 
     // Return the original path since we didn't change the directory name
@@ -560,12 +637,72 @@ fn gui_get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Latest release info from the GitHub Releases API + a comparison to the running version.
 #[tauri::command]
-fn gui_check_for_updates() -> Result<bool, String> {
-    match version_check::check_for_updates() {
-        Ok(is_newer) => Ok(is_newer),
-        Err(e) => Err(format!("Error checking for updates: {e}")),
+fn gui_get_update_info() -> Result<version_check::UpdateInfo, String> {
+    version_check::check_for_updates().map_err(|e| format!("Update check failed: {e}"))
+}
+
+/// Compile-time target platform: "windows" / "macos" / "linux" / "unknown".
+#[tauri::command]
+fn gui_get_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
     }
+}
+
+/// Wipe both the elevation-tile and ESA-land-cover on-disk caches, so
+/// subsequent generations re-download from the upstream providers. This
+/// is what the "Clean tile cache" button in the GUI's Application
+/// settings panel calls into.
+///
+/// Returns a single human-readable status line on success (the JS side
+/// surfaces it as a toast-style notification), and an `Err` only when
+/// one or more files couldn't be deleted — that case is rare (usually
+/// a file still locked by a live generation run) but worth making
+/// visible so the user knows the wipe was partial.
+///
+/// Both cache roots themselves are left on disk; only their *contents*
+/// are removed, so the next elevation/land-cover fetch doesn't have to
+/// recreate the directory tree.
+#[tauri::command]
+fn gui_clear_tile_caches() -> Result<String, String> {
+    use crate::elevation::cache::clear_all_cached_tiles;
+    use crate::land_cover::clear_land_cover_cache;
+    use crate::models_3d::clear_model_caches;
+
+    let combined = clear_all_cached_tiles()
+        .combined(clear_land_cover_cache())
+        .combined(clear_model_caches());
+    let megabytes = combined.bytes_freed as f64 / (1024.0 * 1024.0);
+
+    if combined.errors > 0 {
+        return Err(format!(
+            "Cleared {} cached file{} ({:.1} MB), but {} file{} could not be removed",
+            combined.files_deleted,
+            if combined.files_deleted == 1 { "" } else { "s" },
+            megabytes,
+            combined.errors,
+            if combined.errors == 1 { "" } else { "s" },
+        ));
+    }
+
+    if combined.files_deleted == 0 {
+        return Ok("Tile cache was already empty".to_string());
+    }
+
+    Ok(format!(
+        "Cleared {} cached file{} ({:.1} MB freed)",
+        combined.files_deleted,
+        if combined.files_deleted == 1 { "" } else { "s" },
+        megabytes,
+    ))
 }
 
 /// Returns the world map image data as base64 and geo bounds for overlay display.
@@ -707,7 +844,10 @@ fn gui_start_generation(
     roof_enabled: bool,
     fillground_enabled: bool,
     land_cover_enabled: bool, // renamed from city_boundaries_enabled
+    use_3d_enabled: bool,
     disable_height_limit: bool,
+    aws_only_elevation: bool,
+    bake_lighting_enabled: bool,
     is_new_world: bool,
     spawn_point: Option<(f64, f64)>,
     telemetry_consent: bool,
@@ -726,54 +866,52 @@ fn gui_start_generation(
     // For new Java worlds, set the spawn point in level.dat
     // Only update player position for Java worlds - Bedrock worlds don't have a pre-existing
     // level.dat to modify (the spawn point will be set when the .mcworld is created)
-    if is_new_world && world_format != "bedrock" {
-        let llbbox = match LLBBox::from_str(&bbox_text) {
-            Ok(bbox) => bbox,
-            Err(e) => {
-                let error_msg = format!("Failed to parse bounding box: {e}");
-                eprintln!("{error_msg}");
-                emit_gui_error(&error_msg);
-                return Err(error_msg);
-            }
-        };
+    if is_new_world && world_format != "bedrock" && !world_format.starts_with("luanti") {
+        let prep_result: Result<(), String> = (|| -> Result<(), String> {
+            let llbbox = LLBBox::from_str(&bbox_text)
+                .map_err(|e| format!("Failed to parse bounding box: {e}"))?;
 
-        let (transformer, xzbbox) = match CoordTransformer::llbbox_to_xzbbox(&llbbox, world_scale) {
-            Ok(result) => result,
-            Err(e) => {
-                let error_msg = format!("Failed to create coordinate transformer: {e}");
-                eprintln!("{error_msg}");
-                emit_gui_error(&error_msg);
-                return Err(error_msg);
-            }
-        };
+            let (transformer, xzbbox) = CoordTransformer::llbbox_to_xzbbox(&llbbox, world_scale)
+                .map_err(|e| format!("Failed to create coordinate transformer: {e}"))?;
 
-        let (spawn_x, spawn_z) = if let Some(coords) = spawn_point {
-            // User selected a spawn point - verify it's within bounds and convert to XZ
-            let llpoint = LLPoint::new(coords.0, coords.1)
-                .map_err(|e| format!("Failed to parse spawn point: {e}"))?;
+            let (spawn_x, spawn_z) = if let Some(coords) = spawn_point {
+                let llpoint = LLPoint::new(coords.0, coords.1)
+                    .map_err(|e| format!("Failed to parse spawn point: {e}"))?;
 
-            if llbbox.contains(&llpoint) {
-                let xzpoint = transformer.transform_point(llpoint);
-                (xzpoint.x, xzpoint.z)
+                if llbbox.contains(&llpoint) {
+                    let xzpoint = transformer.transform_point(llpoint);
+                    (xzpoint.x, xzpoint.z)
+                } else {
+                    calculate_default_spawn(&xzbbox)
+                }
             } else {
-                // Spawn point outside bounds, use default
                 calculate_default_spawn(&xzbbox)
+            };
+
+            let (spawn_x, spawn_z) = map_transformation::rotate::rotate_xz_point(
+                spawn_x,
+                spawn_z,
+                rotation_angle.clamp(-90.0, 90.0),
+                &xzbbox,
+            );
+
+            set_player_spawn_in_level_dat(&selected_world, spawn_x, spawn_z)
+                .map_err(|e| format!("Failed to set spawn point: {e}"))?;
+
+            if disable_height_limit {
+                crate::world_utils::install_tall_datapack(std::path::Path::new(&selected_world))
+                    .map_err(|e| format!("Failed to install tall-world datapack: {e}"))?;
             }
-        } else {
-            // No user-selected spawn point - use default at X=1, Z=1 relative to world origin
-            calculate_default_spawn(&xzbbox)
-        };
 
-        // Rotate spawn point to match the rotated world
-        let (spawn_x, spawn_z) = map_transformation::rotate::rotate_xz_point(
-            spawn_x,
-            spawn_z,
-            rotation_angle.clamp(-90.0, 90.0),
-            &xzbbox,
-        );
+            Ok(())
+        })();
 
-        set_player_spawn_in_level_dat(&selected_world, spawn_x, spawn_z)
-            .map_err(|e| format!("Failed to set spawn point: {e}"))?;
+        if let Err(error_msg) = prep_result {
+            eprintln!("{error_msg}");
+            emit_gui_error(&error_msg);
+            remove_new_java_world(&PathBuf::from(&selected_world));
+            return Err(error_msg);
+        }
     }
 
     tauri::async_runtime::spawn(async move {
@@ -781,11 +919,30 @@ fn gui_start_generation(
             let world_path = PathBuf::from(&selected_world);
 
             // Determine world format from UI selection first (needed for session lock decision)
+
+            let luanti_game = if world_format.starts_with("luanti") {
+                Some(crate::luanti_block_map::LuantiGame::Mineclonia)
+            } else {
+                None
+            };
+
             let world_format = if world_format == "bedrock" {
                 WorldFormat::BedrockMcWorld
+            } else if world_format.starts_with("luanti") {
+                WorldFormat::LuantiWorld
             } else {
                 WorldFormat::JavaAnvil
             };
+
+            // Arm cleanup for freshly created Java worlds. Declared before the
+            // SessionLock so the lock's file handle is released first on drop
+            // (Windows needs that to remove the parent folder).
+            let mut cleanup_guard: Option<NewWorldCleanup> =
+                if is_new_world && world_format == WorldFormat::JavaAnvil {
+                    Some(NewWorldCleanup::new(world_path.clone()))
+                } else {
+                    None
+                };
 
             // Check available disk space before starting generation (minimum 3GB required)
             const MIN_DISK_SPACE_BYTES: u64 = 3 * 1024 * 1024 * 1024; // 3 GB
@@ -795,18 +952,38 @@ fn gui_start_generation(
                 // For Bedrock, check current directory where .mcworld will be created
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
             };
-            match fs2::available_space(&check_path) {
-                Ok(available) if available < MIN_DISK_SPACE_BYTES => {
+            // Probe the nearest existing ancestor: a missing or space-containing
+            // path otherwise confuses the Windows volume lookup, which then reports
+            // 0 bytes free. Only block on a confident positive reading; treat an
+            // error or a 0/undeterminable result as "can't tell" and proceed (#824).
+            let probe_path = {
+                let mut p = check_path.as_path();
+                loop {
+                    if p.exists() {
+                        break p.to_path_buf();
+                    }
+                    match p.parent() {
+                        Some(parent) => p = parent,
+                        // No existing ancestor (e.g. a bare relative path): probe
+                        // the current dir so the query always hits a real path.
+                        None => {
+                            break std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        }
+                    }
+                }
+            };
+            match fs2::available_space(&probe_path) {
+                Ok(available) if available > 0 && available < MIN_DISK_SPACE_BYTES => {
                     let error_msg = "Not enough disk space available.".to_string();
                     eprintln!("{error_msg}");
                     emit_gui_error(&error_msg);
                     return Err(error_msg);
                 }
+                Ok(_) => {} // Sufficient, or 0/undeterminable: don't false-block
                 Err(e) => {
                     // Log warning but don't block generation if we can't check space
                     eprintln!("Warning: Could not check disk space: {e}");
                 }
-                _ => {} // Sufficient space available
             }
 
             // Acquire session lock for Java worlds only
@@ -853,7 +1030,26 @@ fn gui_start_generation(
                     let output_dir = crate::world_utils::get_bedrock_output_directory();
                     let (output_path, lvl_name) =
                         crate::world_utils::build_bedrock_output(&bbox, output_dir);
+                    progress::emit_world_name_update(&lvl_name);
                     (output_path, Some(lvl_name))
+                }
+                WorldFormat::LuantiWorld => {
+                    let worlds_dir = crate::world_utils::get_luanti_worlds_directory();
+                    let _ = std::fs::create_dir_all(&worlds_dir);
+                    let mut counter = 1;
+                    let world_name = loop {
+                        let candidate = format!("Arnis Luanti World {counter}");
+                        if !worlds_dir.join(&candidate).exists() {
+                            break candidate;
+                        }
+                        counter += 1;
+                    };
+                    let luanti_path = worlds_dir.join(&world_name);
+                    println!(
+                        "Creating Luanti world at: {}",
+                        luanti_path.display().to_string().bright_white().bold()
+                    );
+                    (luanti_path, Some(world_name))
                 }
             };
 
@@ -888,6 +1084,8 @@ fn gui_start_generation(
                 format: world_format,
                 level_name,
                 spawn_point: mc_spawn_point,
+                luanti_game,
+                ground_level,
             };
 
             // Create an Args instance with the chosen bounding box
@@ -897,25 +1095,31 @@ fn gui_start_generation(
                 file: None,
                 save_json_file: None,
                 path: Some(if world_format == WorldFormat::JavaAnvil {
-                    generation_path
+                    generation_path.clone()
                 } else {
                     world_path
                 }),
                 bedrock: world_format == WorldFormat::BedrockMcWorld,
+                luanti: world_format == WorldFormat::LuantiWorld,
                 downloader: "requests".to_string(),
                 scale: world_scale,
+                projection: crate::projection::ProjectionKind::Local,
                 ground_level,
                 terrain: terrain_enabled,
                 interior: interior_enabled,
                 roof: roof_enabled,
                 fillground: fillground_enabled,
                 land_cover: land_cover_enabled,
+                use_3d: use_3d_enabled,
                 debug: false,
                 timeout: Some(std::time::Duration::from_secs(40)),
                 spawn_lat: None,
                 spawn_lng: None,
                 rotation: rotation_angle.clamp(-90.0, 90.0),
                 disable_height_limit,
+                aws_only_elevation,
+                benchmark: false,
+                bake_lighting: bake_lighting_enabled,
             };
 
             // If skip_osm_objects is true (terrain-only mode), skip fetching and processing OSM data
@@ -936,7 +1140,11 @@ fn gui_start_generation(
                     ground,
                     &args,
                     generation_options.clone(),
+                    osm_parser::OutlineSuppression::new(),
                 );
+                if let Some(g) = cleanup_guard.as_mut() {
+                    g.disarm();
+                }
                 // Explicitly release session lock before showing Done message
                 // so Minecraft can open the world immediately
                 drop(_session_lock);
@@ -945,11 +1153,9 @@ fn gui_start_generation(
 
                 // Start map preview generation silently in background (Java only)
                 if world_format == WorldFormat::JavaAnvil {
-                    let preview_info = data_processing::MapPreviewInfo::new(
-                        generation_options.path.clone(),
-                        &xzbbox,
-                    );
-                    data_processing::start_map_preview_generation(preview_info);
+                    let preview_info =
+                        map_preview::MapPreviewInfo::new(generation_options.path.clone(), &xzbbox);
+                    map_preview::start_map_preview_generation(preview_info);
                 }
 
                 return Ok(());
@@ -958,8 +1164,14 @@ fn gui_start_generation(
             // Run data fetch and world generation (standard mode: objects + terrain, or objects only)
             match retrieve_data::fetch_data_from_overpass(args.bbox, args.debug, "requests", None) {
                 Ok(raw_data) => {
-                    let (mut parsed_elements, mut xzbbox) =
-                        osm_parser::parse_osm_data(raw_data, args.bbox, args.scale, args.debug);
+                    let (mut parsed_elements, mut xzbbox, outline_suppression) =
+                        osm_parser::parse_osm_data(
+                            raw_data,
+                            args.bbox,
+                            args.scale,
+                            args.debug,
+                            crate::projection::ProjectionKind::Local,
+                        );
 
                     // Fetch supplementary building data from Overture Maps
                     {
@@ -989,6 +1201,10 @@ fn gui_start_generation(
 
                     let mut ground = ground::generate_ground_data(&args);
 
+                    // OSM water override first, then bridge repair.
+                    ground.apply_osm_water_override(&parsed_elements, &xzbbox);
+                    ground.apply_bridge_land_cover_repair(&parsed_elements, &xzbbox, args.scale);
+
                     // Transform map (parsed_elements). Operations are defined in a json file
                     map_transformation::transform_map(
                         &mut parsed_elements,
@@ -1014,7 +1230,11 @@ fn gui_start_generation(
                         ground,
                         &args,
                         generation_options.clone(),
+                        outline_suppression,
                     );
+                    if let Some(g) = cleanup_guard.as_mut() {
+                        g.disarm();
+                    }
                     // Explicitly release session lock before showing Done message
                     // so Minecraft can open the world immediately
                     drop(_session_lock);
@@ -1023,18 +1243,19 @@ fn gui_start_generation(
 
                     // Start map preview generation silently in background (Java only)
                     if world_format == WorldFormat::JavaAnvil {
-                        let preview_info = data_processing::MapPreviewInfo::new(
+                        let preview_info = map_preview::MapPreviewInfo::new(
                             generation_options.path.clone(),
                             &xzbbox,
                         );
-                        data_processing::start_map_preview_generation(preview_info);
+                        map_preview::start_map_preview_generation(preview_info);
                     }
 
                     Ok(())
                 }
                 Err(e) => {
                     emit_gui_error(&e.to_string());
-                    // Session lock will be automatically released when _session_lock goes out of scope
+                    // cleanup_guard removes the new world, and SessionLock releases
+                    // its file handle first via reverse drop order.
                     Err(e.to_string())
                 }
             }

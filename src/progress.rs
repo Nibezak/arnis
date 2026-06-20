@@ -21,15 +21,19 @@ pub fn is_running_with_gui() -> bool {
 }
 
 /// This code manages a multi-step process with a progress bar indicating the overall completion.
-/// The progress updates are mapped to specific steps in the pipeline:
+/// Percentages are monotonic in the ACTUAL execution order (download -> overture ->
+/// land cover -> elevation -> parse -> transform -> generate -> ground -> save):
 ///
-/// [1/7] Fetching data... - Starts at: 0% / Completes at: 5%
-/// [2/7] Parsing data... - Starts at: 5% / Completes at: 15%
-/// [3/7] Fetching elevation... - Starts at: 15% / Completes at: 20%
-/// [4/7] Transforming map... - Starts at: 20% / Completes at: 25%
-/// [5/7] Processing terrain... - Starts at: 25% / Completes at: 70%
-/// [6/7] Generating ground... - Starts at: 70% / Completes at: 90%
-/// [7/7] Saving world... - Starts at: 90% / Completes at: 100%
+/// Downloading map data...    1-5%
+/// Adding extra buildings...  6%        (Overture; fetched right after download)
+/// Detecting surface types... 9%        (land cover; skipped if disabled)
+/// Fetching elevation...      10%
+/// Processing elevation...    12-18%
+/// (parsing, silent)          18.5%
+/// Transforming map...        19%
+/// Generating area...         20-70%
+/// Generating ground...       70-90%
+/// Saving world...            90-100%
 ///
 /// The function `emit_gui_progress_update` is used to send real-time progress updates to the UI.
 pub fn emit_gui_progress_update(progress: f64, message: &str) {
@@ -48,13 +52,44 @@ pub fn emit_gui_progress_update(progress: f64, message: &str) {
     }
 }
 
+/// Like `emit_gui_progress_update` but also carries the stream-to-disk regime so
+/// the GUI ETA can pick the right time-weight profile (the post-70% tail is
+/// ~instant when streaming, a real save otherwise). Additive payload field;
+/// only the two terrain emits use it, all other sites stay on the plain fn.
+pub fn emit_gui_progress_update_ex(progress: f64, message: &str, streaming: bool) {
+    if let Some(window) = get_main_window() {
+        let payload = json!({
+            "progress": progress,
+            "message": message,
+            "streaming": streaming
+        });
+        if let Err(e) = window.emit("progress-update", payload) {
+            let error_msg = format!("Failed to emit progress event: {}", e);
+            eprintln!("{}", error_msg);
+            #[cfg(feature = "gui")]
+            send_log(LogLevel::Warning, &error_msg);
+        }
+    }
+}
+
 pub fn emit_gui_error(message: &str) {
-    let truncated_message = if message.len() > 35 {
-        &message[..35]
-    } else {
-        message
-    };
-    emit_gui_progress_update(0.0, &format!("Error! {truncated_message}"));
+    // Truncate by characters (not bytes) to avoid panicking when the GUI
+    // status bar receives an error containing multi-byte UTF-8. e.g.
+    // localized OS error messages like "Недостаточно системных ресурсов…"
+    // where byte 35 lands inside a Cyrillic character.
+    const MAX_CHARS: usize = 35;
+    let truncated: String = message.chars().take(MAX_CHARS).collect();
+    emit_gui_progress_update(0.0, &format!("Error! {truncated}"));
+}
+
+/// Emits the final in-game level name (including localized area suffix for Java,
+/// or the location-based name for Bedrock) so the GUI can display it.
+pub fn emit_world_name_update(name: &str) {
+    if let Some(window) = get_main_window() {
+        if let Err(e) = window.emit("world-name-update", name) {
+            eprintln!("Failed to emit world-name-update event: {e}");
+        }
+    }
 }
 
 /// Emits an event when the world map preview is ready
